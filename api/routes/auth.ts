@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import bcrypt from 'bcryptjs';
 import db from '../db/index.js';
 import { hashPassword, comparePassword } from '../utils/password.js';
 import { signToken } from '../utils/jwt.js';
@@ -65,7 +66,6 @@ export function initSeedData() {
 }
 
 function hashPasswordSync(password: string): string {
-  const bcrypt = require('bcryptjs');
   return bcrypt.hashSync(password, 10);
 }
 
