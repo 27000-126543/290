@@ -225,6 +225,7 @@ router.post('/', (req: AuthRequest, res: Response): void => {
 
     res.status(201).json({ success: true, data: { id: orderId }, message: '工单创建成功' });
   } catch (error) {
+    console.error('Create work order error:', error);
     res.status(500).json({ success: false, error: '创建工单失败' });
   }
 });
