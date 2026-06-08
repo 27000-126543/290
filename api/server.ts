@@ -1,15 +1,23 @@
 /**
  * local server entry file, for local development
  */
+import { createServer } from 'http';
 import app from './app.js';
+import { initWebSocket, startRealtimeDataPush } from './services/websocket.js';
 
 /**
  * start server with port
  */
 const PORT = process.env.PORT || 3002;
 
-const server = app.listen(PORT, () => {
+const server = createServer(app);
+
+initWebSocket(server);
+
+server.listen(PORT, () => {
   console.log(`Server ready on port ${PORT}`);
+  console.log(`WebSocket: ws://localhost:${PORT}/api/stations/{stationId}/realtime?token={jwt}`);
+  startRealtimeDataPush();
 });
 
 /**

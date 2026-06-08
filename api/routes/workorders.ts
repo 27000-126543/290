@@ -4,6 +4,7 @@ import { generateId } from '../utils/common.js';
 import type { AuthRequest } from '../middleware/auth.js';
 import { authMiddleware, roleMiddleware } from '../middleware/auth.js';
 import cron from 'node-cron';
+import { broadcastToRole, broadcastNotification } from '../services/websocket.js';
 
 const router = Router();
 
@@ -30,20 +31,47 @@ function checkWorkOrderEscalation() {
         WHERE id = ?
       `).run(order.id);
 
-      const admins: any[] = db.prepare("SELECT * FROM users WHERE role = 'admin'").all();
-      for (const admin of admins) {
-        db.prepare(`
-          INSERT INTO notifications (user_id, title, content, type)
-          VALUES (?, ?, ?, ?)
-        `).run(
-          admin.id,
-          '工单升级通知',
-          `工单【${order.title}】超过12小时未接单，已升级通知主管处理`,
-          'workorder'
-        );
+      const existing: any = db.prepare(`
+        SELECT COUNT(*) as count FROM notifications 
+        WHERE content LIKE ? AND type = 'workorder'
+      `).get(`%${order.id}%`);
+
+      if (existing && existing.count > 0) {
+        console.log(`Work order ${order.id} already has escalation notification, skipping DB insert`);
+      } else {
+        const admins: any[] = db.prepare("SELECT * FROM users WHERE role = 'admin'").all();
+        for (const admin of admins) {
+          const notificationId = generateId('notif');
+          db.prepare(`
+            INSERT INTO notifications (id, user_id, title, content, type)
+            VALUES (?, ?, ?, ?, ?)
+          `).run(
+            notificationId,
+            admin.id,
+            '工单升级通知',
+            `工单【${order.title}】超过12小时未接单，已升级通知主管处理`,
+            'workorder'
+          );
+
+          broadcastNotification(admin.id, {
+            id: notificationId,
+            title: '工单升级通知',
+            content: `工单【${order.title}】超过12小时未接单，已升级通知主管处理`,
+            type: 'workorder',
+            workOrderId: order.id,
+          });
+        }
       }
 
-      console.log(`Work order ${order.id} escalated`);
+      broadcastToRole('admin', {
+        type: 'workorder_escalated',
+        workOrderId: order.id,
+        title: order.title,
+        priority: order.priority,
+        message: `工单【${order.title}】超过12小时未接单，已自动升级`,
+      });
+
+      console.log(`Work order ${order.id} escalated and pushed via WebSocket`);
     }
   } catch (error) {
     console.error('Error checking work order escalation:', error);
@@ -184,9 +212,10 @@ router.post('/', (req: AuthRequest, res: Response): void => {
     const maintainers: any[] = db.prepare("SELECT * FROM users WHERE role = 'maintainer' LIMIT 3").all();
     for (const maintainer of maintainers) {
       db.prepare(`
-        INSERT INTO notifications (user_id, title, content, type)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO notifications (id, user_id, title, content, type)
+        VALUES (?, ?, ?, ?, ?)
       `).run(
+        generateId('notif'),
         maintainer.id,
         '新工单待分配',
         `${user.name}提交了新工单：${title}`,
@@ -219,9 +248,10 @@ router.put('/:id/assign', roleMiddleware(['admin', 'maintainer']), (req: AuthReq
     `).run(id, '分配工单', user.name, `分配给 ${assigneeName}`);
 
     db.prepare(`
-      INSERT INTO notifications (user_id, title, content, type)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO notifications (id, user_id, title, content, type)
+      VALUES (?, ?, ?, ?, ?)
     `).run(
+      generateId('notif'),
       assignee,
       '工单分配通知',
       `您被分配了新工单，请及时处理`,
@@ -253,9 +283,10 @@ router.put('/:id/accept', roleMiddleware(['maintainer']), (req: AuthRequest, res
 
     const order: any = db.prepare('SELECT * FROM work_orders WHERE id = ?').get(id);
     db.prepare(`
-      INSERT INTO notifications (user_id, title, content, type)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO notifications (id, user_id, title, content, type)
+      VALUES (?, ?, ?, ?, ?)
     `).run(
+      generateId('notif'),
       order.user_id,
       '工单进度更新',
       `您的工单【${order.title}】已被运维人员接单`,
@@ -288,9 +319,10 @@ router.put('/:id/complete', roleMiddleware(['maintainer']), (req: AuthRequest, r
 
     const order: any = db.prepare('SELECT * FROM work_orders WHERE id = ?').get(id);
     db.prepare(`
-      INSERT INTO notifications (user_id, title, content, type)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO notifications (id, user_id, title, content, type)
+      VALUES (?, ?, ?, ?, ?)
     `).run(
+      generateId('notif'),
       order.user_id,
       '工单完成通知',
       `您的工单【${order.title}】已处理完成`,
@@ -309,6 +341,17 @@ router.put('/:id/escalate', (req: AuthRequest, res: Response): void => {
     const userId = req.user?.id;
     const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
 
+    const order: any = db.prepare('SELECT * FROM work_orders WHERE id = ?').get(id);
+    if (!order) {
+      res.status(404).json({ success: false, error: '工单不存在' });
+      return;
+    }
+
+    if (order.escalated === 1) {
+      res.json({ success: true, message: '工单已处于升级状态', data: { alreadyEscalated: true } });
+      return;
+    }
+
     db.prepare(`
       UPDATE work_orders 
       SET escalated = 1, updated_at = datetime('now')
@@ -320,20 +363,43 @@ router.put('/:id/escalate', (req: AuthRequest, res: Response): void => {
       VALUES (?, ?, ?, ?)
     `).run(id, '升级工单', user.name, '用户手动升级工单');
 
-    const admins: any[] = db.prepare("SELECT * FROM users WHERE role = 'admin'").all();
-    const order: any = db.prepare('SELECT * FROM work_orders WHERE id = ?').get(id);
+    const existing: any = db.prepare(`
+      SELECT COUNT(*) as count FROM notifications 
+      WHERE content LIKE ? AND type = 'workorder'
+    `).get(`%${order.id}%`);
 
-    for (const admin of admins) {
-      db.prepare(`
-        INSERT INTO notifications (user_id, title, content, type)
-        VALUES (?, ?, ?, ?)
-      `).run(
-        admin.id,
-        '工单升级通知',
-        `工单【${order.title}】被用户升级，请主管关注`,
-        'workorder'
-      );
+    if (!existing || existing.count === 0) {
+      const admins: any[] = db.prepare("SELECT * FROM users WHERE role = 'admin'").all();
+      for (const admin of admins) {
+        const notificationId = generateId('notif');
+        db.prepare(`
+          INSERT INTO notifications (id, user_id, title, content, type)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(
+          notificationId,
+          admin.id,
+          '工单升级通知',
+          `工单【${order.title}】被${user.name}手动升级，请主管关注`,
+          'workorder'
+        );
+
+        broadcastNotification(admin.id, {
+          id: notificationId,
+          title: '工单升级通知',
+          content: `工单【${order.title}】被${user.name}手动升级，请主管关注`,
+          type: 'workorder',
+          workOrderId: order.id,
+        });
+      }
     }
+
+    broadcastToRole('admin', {
+      type: 'workorder_escalated',
+      workOrderId: order.id,
+      title: order.title,
+      priority: order.priority,
+      message: `工单【${order.title}】被${user.name}手动升级`,
+    });
 
     res.json({ success: true, message: '工单已升级' });
   } catch (error) {

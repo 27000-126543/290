@@ -6,6 +6,8 @@ import { authMiddleware, roleMiddleware } from '../middleware/auth.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { PDFDocument, rgb } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
 
 const router = Router();
 
@@ -17,75 +19,171 @@ if (!fs.existsSync(contractsDir)) {
   fs.mkdirSync(contractsDir, { recursive: true });
 }
 
+router.get('/contracts/:filename', (req: any, res: Response): void => {
+  try {
+    const { filename } = req.params;
+    const contractPath = path.join(contractsDir, filename);
+
+    if (!fs.existsSync(contractPath)) {
+      res.status(404).json({ success: false, error: '合同文件不存在' });
+      return;
+    }
+
+    const content = fs.readFileSync(contractPath);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`);
+    res.send(content);
+  } catch (error) {
+    res.status(500).json({ success: false, error: '下载合同失败' });
+  }
+});
+
 router.use(authMiddleware);
 
-function generateContractContent(application: any): string {
-  const date = new Date().toLocaleDateString('zh-CN');
-  return `
-========================================
-        分布式电源并网服务合同
-========================================
+let cachedFontBytes: Uint8Array | null = null;
 
-合同编号: GE-${application.id.toUpperCase()}
-签订日期: ${date}
+function getChineseFontBytes(): Uint8Array {
+  if (cachedFontBytes) return cachedFontBytes;
+  const fontPaths = [
+    'C:\\Windows\\Fonts\\simhei.ttf',
+    'C:\\Windows\\Fonts\\msyh.ttc',
+    'C:\\Windows\\Fonts\\simsun.ttc',
+  ];
+  for (const fp of fontPaths) {
+    if (fs.existsSync(fp)) {
+      cachedFontBytes = new Uint8Array(fs.readFileSync(fp));
+      return cachedFontBytes;
+    }
+  }
+  throw new Error('No Chinese font found on system');
+}
 
-甲方（供电企业）：绿能电力有限公司
-法定代表人：张经理
-地址：北京市朝阳区能源大厦
+async function generateContractPDF(application: any): Promise<Uint8Array> {
+  const pdfDoc = await PDFDocument.create();
+  pdfDoc.registerFontkit(fontkit);
 
-乙方（用户）：${application.applicant_name}
-身份证号：${application.applicant_id_card}
-联系电话：${application.applicant_phone}
-用电地址：${application.address}
+  const fontBytes = getChineseFontBytes();
+  const customFont = await pdfDoc.embedFont(fontBytes, { subset: true });
 
-一、并网项目基本情况
-1. 项目名称：${application.station_name}
-2. 项目类型：${application.station_type === 'photovoltaic' ? '光伏发电' : '风力发电'}
-3. 装机容量：${application.station_capacity} kW
-4. 项目地址：${application.address}
+  const page = pdfDoc.addPage([600, 800]);
+  const { width, height } = page.getSize();
+  const margin = 50;
+  let y = height - margin;
 
-二、服务内容
-1. 甲方负责为乙方提供并网接入服务
-2. 乙方按照国家相关标准建设分布式电源项目
-3. 甲方按照国家规定的电价标准结算电费
+  const drawText = (text: string, size: number = 12, indent: number = 0) => {
+    page.drawText(text, {
+      x: margin + indent,
+      y,
+      size,
+      font: customFont,
+      color: rgb(0, 0, 0),
+    });
+    y -= size + 8;
+  };
 
-三、双方权利与义务
-（一）甲方权利与义务
-1. 按照国家电网公司相关规定受理乙方并网申请
-2. 及时组织完成并网验收和调试工作
-3. 按照约定及时支付电费及补贴
-4. 为乙方提供必要的技术支持和服务
+  const drawLine = () => {
+    page.drawLine({
+      start: { x: margin, y },
+      end: { x: width - margin, y },
+      thickness: 0.5,
+      color: rgb(0.5, 0.5, 0.5),
+    });
+    y -= 15;
+  };
 
-（二）乙方权利与义务
-1. 按照批准的方案建设分布式电源项目
-2. 保证项目设备符合国家相关标准
-3. 配合甲方完成并网验收工作
-4. 按时缴纳相关费用
+  const date = new Date().toISOString().split('T')[0];
 
-四、电费结算
-1. 上网电价按照国家相关规定执行
-2. 电费按月结算，每月15日前支付上月电费
-3. 国家补贴按照相关政策执行
+  drawText('分布式电源并网服务合同', 20);
+  y -= 5;
+  drawText('Distributed Power Grid Connection Service Contract', 10);
+  y -= 10;
+  drawLine();
 
-五、合同期限
-本合同有效期为20年，自并网验收合格之日起计算。
+  drawText(`合同编号: GE-${application.id.toUpperCase()}`, 12);
+  drawText(`签订日期: ${date}`, 12);
+  y -= 10;
 
-六、违约责任
-任何一方违反本合同约定，应承担相应的违约责任。
+  drawText('甲方（供电企业）：绿能电力有限公司', 13);
+  drawText('法定代表人：张经理', 11, 20);
+  drawText('地址：北京市朝阳区能源大厦', 11, 20);
+  y -= 5;
 
-七、争议解决
-双方因履行本合同发生争议，应协商解决；协商不成的，可向当地人民法院提起诉讼。
+  drawText(`乙方（用户）：${application.applicant_name}`, 13);
+  drawText(`身份证号：${application.applicant_id_card}`, 11, 20);
+  drawText(`联系电话：${application.applicant_phone}`, 11, 20);
+  drawText(`用电地址：${application.address}`, 11, 20);
+  y -= 10;
+  drawLine();
 
-八、其他
-1. 本合同一式两份，甲乙双方各执一份
-2. 本合同自双方签字盖章之日起生效
+  drawText('一、并网项目基本情况', 13);
+  drawText(`1. 项目名称：${application.station_name}`, 11, 20);
+  drawText(`2. 项目类型：${application.station_type === 'photovoltaic' ? '光伏发电' : '风力发电'}`, 11, 20);
+  drawText(`3. 装机容量：${application.station_capacity} kW`, 11, 20);
+  drawText(`4. 项目地址：${application.address}`, 11, 20);
+  y -= 5;
 
-甲方（盖章）：                    乙方（签字）：
-                            ${application.applicant_name}
+  drawText('二、服务内容', 13);
+  drawText('1. 甲方负责为乙方提供并网接入服务', 11, 20);
+  drawText('2. 乙方按照国家相关标准建设分布式电源项目', 11, 20);
+  drawText('3. 甲方按照国家规定的电价标准结算电费', 11, 20);
+  y -= 5;
 
-日期：${date}                    日期：${date}
-========================================
-`;
+  drawText('三、双方权利与义务', 13);
+  drawText('（一）甲方权利与义务', 12, 20);
+  drawText('1. 按照国家电网公司相关规定受理乙方并网申请', 11, 40);
+  drawText('2. 及时组织完成并网验收和调试工作', 11, 40);
+  drawText('3. 按照约定及时支付电费及补贴', 11, 40);
+  drawText('4. 为乙方提供必要的技术支持和服务', 11, 40);
+  y -= 3;
+  drawText('（二）乙方权利与义务', 12, 20);
+  drawText('1. 按照批准的方案建设分布式电源项目', 11, 40);
+  drawText('2. 保证项目设备符合国家相关标准', 11, 40);
+  drawText('3. 配合甲方完成并网验收工作', 11, 40);
+  drawText('4. 按时缴纳相关费用', 11, 40);
+  y -= 5;
+
+  drawText('四、电费结算', 13);
+  drawText('1. 上网电价按照国家相关规定执行', 11, 20);
+  drawText('2. 电费按月结算，每月15日前支付上月电费', 11, 20);
+  drawText('3. 国家补贴按照相关政策执行', 11, 20);
+  y -= 5;
+
+  drawText('五、合同期限', 13);
+  drawText('本合同有效期为20年，自并网验收合格之日起计算。', 11, 20);
+  y -= 5;
+
+  drawText('六、违约责任', 13);
+  drawText('任何一方违反本合同约定，应承担相应的违约责任。', 11, 20);
+  y -= 5;
+
+  drawText('七、争议解决', 13);
+  drawText('双方因履行本合同发生争议，应协商解决；协商不成的，可向当地人民法院提起诉讼。', 11, 20);
+  y -= 5;
+
+  drawText('八、其他', 13);
+  drawText('1. 本合同一式两份，甲乙双方各执一份', 11, 20);
+  drawText('2. 本合同自双方签字盖章之日起生效', 11, 20);
+  y -= 20;
+  drawLine();
+  y -= 10;
+
+  drawText('甲方（盖章）：                    乙方（签字）：', 12);
+  y -= 30;
+  drawText(`                            ${application.applicant_name}`, 12);
+  y -= 10;
+  drawText(`日期：${date}                    日期：${date}`, 12);
+  y -= 30;
+
+  page.drawText('绿能电力有限公司', {
+    x: margin,
+    y,
+    size: 10,
+    font: customFont,
+    color: rgb(0.6, 0.6, 0.6),
+  });
+
+  const pdfBytes = await pdfDoc.save();
+  return pdfBytes;
 }
 
 router.get('/', (req: AuthRequest, res: Response): void => {
@@ -217,9 +315,10 @@ router.post('/', (req: AuthRequest, res: Response): void => {
     );
 
     db.prepare(`
-      INSERT INTO notifications (user_id, title, content, type)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO notifications (id, user_id, title, content, type)
+      VALUES (?, ?, ?, ?, ?)
     `).run(
+      generateId('notif'),
       userId,
       '并网申请已提交',
       `您的并网申请【${stationName}】已成功提交，等待审核`,
@@ -232,7 +331,7 @@ router.post('/', (req: AuthRequest, res: Response): void => {
   }
 });
 
-router.put('/:id/review', roleMiddleware(['admin']), (req: AuthRequest, res: Response): void => {
+router.put('/:id/review', roleMiddleware(['admin']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const { status, remark } = req.body;
@@ -248,10 +347,10 @@ router.put('/:id/review', roleMiddleware(['admin']), (req: AuthRequest, res: Res
     let contractUrl = null;
 
     if (status === 'approved') {
-      const contractContent = generateContractContent(application);
-      const contractFileName = `contract_${id}.txt`;
+      const pdfBytes = await generateContractPDF(application);
+      const contractFileName = `contract_${id}.pdf`;
       const contractPath = path.join(contractsDir, contractFileName);
-      fs.writeFileSync(contractPath, contractContent, 'utf-8');
+      fs.writeFileSync(contractPath, Buffer.from(pdfBytes));
       contractUrl = `/api/grid/contracts/${contractFileName}`;
       newStatus = 'completed';
       reviewRemark = remark || '资质审核通过，已生成电子合同';
@@ -270,9 +369,10 @@ router.put('/:id/review', roleMiddleware(['admin']), (req: AuthRequest, res: Res
     `).run(newStatus, reviewRemark, contractUrl, id);
 
     db.prepare(`
-      INSERT INTO notifications (user_id, title, content, type)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO notifications (id, user_id, title, content, type)
+      VALUES (?, ?, ?, ?, ?)
     `).run(
+      generateId('notif'),
       application.user_id,
       newStatus === 'completed' ? '并网申请已通过' : 
       newStatus === 'rejected' ? '并网申请未通过' :
@@ -287,11 +387,12 @@ router.put('/:id/review', roleMiddleware(['admin']), (req: AuthRequest, res: Res
 
     res.json({ success: true, message: '审核完成', data: { contractUrl } });
   } catch (error) {
-    res.status(500).json({ success: false, error: '审核失败' });
+    console.error('Review error:', error);
+    res.status(500).json({ success: false, error: '审核失败', detail: (error as Error).message });
   }
 });
 
-router.put('/:id/auto-review', roleMiddleware(['admin']), (req: AuthRequest, res: Response): void => {
+router.put('/:id/auto-review', roleMiddleware(['admin']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const application: any = db.prepare('SELECT * FROM grid_applications WHERE id = ?').get(id);
@@ -315,10 +416,10 @@ router.put('/:id/auto-review', roleMiddleware(['admin']), (req: AuthRequest, res
     }
 
     if (passed) {
-      const contractContent = generateContractContent(application);
-      const contractFileName = `contract_${id}.txt`;
+      const pdfBytes = await generateContractPDF(application);
+      const contractFileName = `contract_${id}.pdf`;
       const contractPath = path.join(contractsDir, contractFileName);
-      fs.writeFileSync(contractPath, contractContent, 'utf-8');
+      fs.writeFileSync(contractPath, Buffer.from(pdfBytes));
       const contractUrl = `/api/grid/contracts/${contractFileName}`;
 
       db.prepare(`
@@ -328,9 +429,10 @@ router.put('/:id/auto-review', roleMiddleware(['admin']), (req: AuthRequest, res
       `).run('系统自动审核通过，资质齐全', contractUrl, id);
 
       db.prepare(`
-        INSERT INTO notifications (user_id, title, content, type)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO notifications (id, user_id, title, content, type)
+        VALUES (?, ?, ?, ?, ?)
       `).run(
+        generateId('notif'),
         application.user_id,
         '并网申请自动审核通过',
         `您的并网申请【${application.station_name}】已通过系统自动审核，电子合同已生成`,
@@ -356,26 +458,8 @@ router.put('/:id/auto-review', roleMiddleware(['admin']), (req: AuthRequest, res
       });
     }
   } catch (error) {
-    res.status(500).json({ success: false, error: '自动审核失败' });
-  }
-});
-
-router.get('/contracts/:filename', (req: AuthRequest, res: Response): void => {
-  try {
-    const { filename } = req.params;
-    const contractPath = path.join(contractsDir, filename);
-
-    if (!fs.existsSync(contractPath)) {
-      res.status(404).json({ success: false, error: '合同文件不存在' });
-      return;
-    }
-
-    const content = fs.readFileSync(contractPath, 'utf-8');
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send(content);
-  } catch (error) {
-    res.status(500).json({ success: false, error: '下载合同失败' });
+    console.error('Auto review error:', error);
+    res.status(500).json({ success: false, error: '自动审核失败', detail: (error as Error).message });
   }
 });
 

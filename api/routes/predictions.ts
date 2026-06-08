@@ -2,18 +2,13 @@ import { Router, type Response } from 'express';
 import db from '../db/index.js';
 import type { AuthRequest } from '../middleware/auth.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { trainMonthlyPredictionModel, generateFuturePredictions, getSeasonFactor } from '../services/ml.js';
 
 const router = Router();
 
 router.use(authMiddleware);
 
-function predictGeneration(historyData: any[], weatherData: any[]): any[] {
-  const predictions: any[] = [];
-
-  const avgGeneration = historyData.length > 0
-    ? historyData.reduce((sum: number, d: any) => sum + d.generation, 0) / historyData.length
-    : 35;
-
+function predictGeneration(historyData: any[], weatherData: any[]): { predictions: any[], modelInfo: any } {
   const weatherFactors: Record<string, number> = {
     '晴': 1.0,
     '多云': 0.75,
@@ -23,18 +18,30 @@ function predictGeneration(historyData: any[], weatherData: any[]): any[] {
     '大雨': 0.1,
   };
 
+  const model = trainMonthlyPredictionModel(historyData);
+  const today = new Date();
+  const seasonFactor = getSeasonFactor(today);
+  const startIndex = historyData.length;
+
+  const futureValues = generateFuturePredictions(
+    model.slope,
+    model.intercept,
+    weatherData.length,
+    startIndex,
+    seasonFactor,
+    1
+  );
+
+  const predictions: any[] = [];
   for (let i = 0; i < weatherData.length; i++) {
     const weather = weatherData[i];
     const weatherFactor = weatherFactors[weather.weather] || 0.8;
+    const basePrediction = futureValues[i] || model.modelInfo.avgGeneration || 35;
+    const predictedGen = basePrediction * weatherFactor;
     
-    const dayOfWeek = new Date(weather.date).getDay();
-    const weekendFactor = (dayOfWeek === 0 || dayOfWeek === 6) ? 0.95 : 1.0;
-    
-    const randomFactor = 0.9 + Math.random() * 0.2;
-    
-    const predictedGen = avgGeneration * weatherFactor * weekendFactor * randomFactor;
-    
-    const confidence = Math.round(60 + (weatherFactor * 30) + Math.random() * 10);
+    const baseConfidence = model.rSquared * 100;
+    const weatherConfidence = weatherFactor >= 0.8 ? 10 : weatherFactor >= 0.5 ? 5 : -10;
+    const confidence = Math.min(95, Math.max(50, Math.round(baseConfidence + weatherConfidence)));
     
     let suggestion = '';
     if (weatherFactor >= 0.8) {
@@ -55,7 +62,7 @@ function predictGeneration(historyData: any[], weatherData: any[]): any[] {
     });
   }
 
-  return predictions;
+  return { predictions, modelInfo: model.modelInfo };
 }
 
 router.get('/stations/:stationId', (req: AuthRequest, res: Response): void => {
@@ -84,7 +91,7 @@ router.get('/stations/:stationId', (req: AuthRequest, res: Response): void => {
       });
     }
 
-    const predictions = predictGeneration(historyData, weatherData);
+    const { predictions, modelInfo } = predictGeneration(historyData, weatherData);
 
     for (const pred of predictions) {
       db.prepare(`
@@ -95,7 +102,10 @@ router.get('/stations/:stationId', (req: AuthRequest, res: Response): void => {
 
     res.json({
       success: true,
-      data: predictions,
+      data: {
+        predictions,
+        modelInfo,
+      },
     });
   } catch (error) {
     res.status(500).json({ success: false, error: '获取预测数据失败' });
@@ -113,37 +123,29 @@ router.get('/stations/:stationId/model-info', (req: AuthRequest, res: Response):
       LIMIT 90
     `).all(stationId);
 
-    const totalData = historyData.length;
-    const avgGeneration = totalData > 0
-      ? historyData.reduce((sum, d) => sum + d.generation, 0) / totalData
-      : 0;
-    const maxGeneration = totalData > 0
-      ? Math.max(...historyData.map(d => d.generation))
-      : 0;
-    const minGeneration = totalData > 0
-      ? Math.min(...historyData.map(d => d.generation))
-      : 0;
-
-    const variance = totalData > 0
-      ? historyData.reduce((sum, d) => sum + Math.pow(d.generation - avgGeneration, 2), 0) / totalData
-      : 0;
-    const stdDev = Math.sqrt(variance);
+    const model = trainMonthlyPredictionModel(historyData);
+    const { modelInfo, slope, intercept, rSquared } = model;
 
     res.json({
       success: true,
       data: {
-        modelName: '加权移动平均预测模型',
-        modelVersion: 'v1.0',
-        accuracy: Math.round((1 - stdDev / avgGeneration) * 100) || 75,
-        trainingDataPoints: totalData,
-        avgDailyGeneration: Math.round(avgGeneration * 10) / 10,
-        maxDailyGeneration: Math.round(maxGeneration * 10) / 10,
-        minDailyGeneration: Math.round(minGeneration * 10) / 10,
+        modelName: '线性回归预测模型 (Linear Regression)',
+        modelVersion: 'v2.0',
+        accuracy: modelInfo.accuracy || 75,
+        trainingDataPoints: modelInfo.trainingSamples,
+        avgDailyGeneration: Math.round(modelInfo.avgGeneration * 10) / 10,
+        maxDailyGeneration: Math.round(modelInfo.maxGeneration * 10) / 10,
+        minDailyGeneration: Math.round(modelInfo.minGeneration * 10) / 10,
         lastTrainingDate: historyData[0]?.date || new Date().toISOString().split('T')[0],
+        modelParameters: {
+          slope: Math.round(slope * 10000) / 10000,
+          intercept: Math.round(intercept * 100) / 100,
+          rSquared: Math.round(rSquared * 100) / 100,
+        },
         factors: [
-          { name: '历史发电量', weight: 0.5 },
-          { name: '天气预报', weight: 0.35 },
-          { name: '季节因素', weight: 0.1 },
+          { name: '历史发电量 (线性回归)', weight: 0.55 },
+          { name: '天气预报', weight: 0.25 },
+          { name: '季节因素', weight: 0.15 },
           { name: '随机波动', weight: 0.05 },
         ],
       },
@@ -195,12 +197,12 @@ router.get('/stations/:stationId/suggestions', (req: AuthRequest, res: Response)
       });
     }
 
-    const alarms: any[] = db.prepare(`
+    const alarms: any = db.prepare(`
       SELECT COUNT(*) as count FROM alarms 
       WHERE station_id = ? AND resolved = 0
     `).get(stationId);
 
-    if (alarms.count > 0) {
+    if (alarms && alarms.count > 0) {
       suggestions.push({
         id: 3,
         type: 'alarm',
