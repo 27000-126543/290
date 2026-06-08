@@ -241,7 +241,41 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_notification_user ON notifications(user_id, read);
   `);
 
+  migrateNotificationsTable();
+
   console.log('Database initialized successfully');
+}
+
+function migrateNotificationsTable() {
+  try {
+    const columns: any[] = db.prepare("PRAGMA table_info(notifications)").all();
+    const idCol = columns.find((c: any) => c.name === 'id');
+    if (idCol && idCol.type === 'INTEGER') {
+      console.log('Migrating notifications table from INTEGER id to TEXT id...');
+      const rows: any[] = db.prepare('SELECT * FROM notifications').all();
+      db.exec('DROP TABLE notifications');
+      db.exec(`
+        CREATE TABLE notifications (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          content TEXT NOT NULL,
+          type TEXT NOT NULL,
+          read INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+      `);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_notification_user ON notifications(user_id, read)');
+      const insert = db.prepare('INSERT INTO notifications (id, user_id, title, content, type, read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      for (const row of rows) {
+        insert.run('migrated_' + row.id, row.user_id, row.title, row.content, row.type, row.read, row.created_at);
+      }
+      console.log(`Migrated ${rows.length} notifications successfully`);
+    }
+  } catch (error) {
+    console.error('Notification migration error (non-fatal):', error);
+  }
 }
 
 export default db;

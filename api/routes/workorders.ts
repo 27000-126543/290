@@ -31,36 +31,34 @@ function checkWorkOrderEscalation() {
         WHERE id = ?
       `).run(order.id);
 
-      const existing: any = db.prepare(`
-        SELECT COUNT(*) as count FROM notifications 
-        WHERE content LIKE ? AND type = 'workorder'
-      `).get(`%${order.id}%`);
+      const admins: any[] = db.prepare("SELECT * FROM users WHERE role = 'admin'").all();
+      for (const admin of admins) {
+        const existing: any = db.prepare(`
+          SELECT COUNT(*) as count FROM notifications 
+          WHERE user_id = ? AND content = ? AND type = 'escalation'
+        `).get(admin.id, `order:${order.id}`);
 
-      if (existing && existing.count > 0) {
-        console.log(`Work order ${order.id} already has escalation notification, skipping DB insert`);
-      } else {
-        const admins: any[] = db.prepare("SELECT * FROM users WHERE role = 'admin'").all();
-        for (const admin of admins) {
-          const notificationId = generateId('notif');
-          db.prepare(`
-            INSERT INTO notifications (id, user_id, title, content, type)
-            VALUES (?, ?, ?, ?, ?)
-          `).run(
-            notificationId,
-            admin.id,
-            '工单升级通知',
-            `工单【${order.title}】超过12小时未接单，已升级通知主管处理`,
-            'workorder'
-          );
+        if (existing && existing.count > 0) continue;
 
-          broadcastNotification(admin.id, {
-            id: notificationId,
-            title: '工单升级通知',
-            content: `工单【${order.title}】超过12小时未接单，已升级通知主管处理`,
-            type: 'workorder',
-            workOrderId: order.id,
-          });
-        }
+        const notificationId = generateId('notif');
+        db.prepare(`
+          INSERT INTO notifications (id, user_id, title, content, type)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(
+          notificationId,
+          admin.id,
+          '工单升级通知',
+          `order:${order.id}`,
+          'escalation'
+        );
+
+        broadcastNotification(admin.id, {
+          id: notificationId,
+          title: '工单升级通知',
+          content: `工单【${order.title}】超过12小时未接单，已升级通知主管处理`,
+          type: 'workorder',
+          workOrderId: order.id,
+        });
       }
 
       broadcastToRole('admin', {
@@ -137,6 +135,48 @@ router.get('/', (req: AuthRequest, res: Response): void => {
     });
   } catch (error) {
     res.status(500).json({ success: false, error: '获取工单列表失败' });
+  }
+});
+
+router.get('/stats/summary', (req: AuthRequest, res: Response): void => {
+  try {
+    const userId = req.user?.id;
+    const role = req.user?.role;
+
+    let whereClause = '';
+    const params: any[] = [];
+
+    if (role === 'user') {
+      whereClause = 'WHERE user_id = ?';
+      params.push(userId);
+    } else if (role === 'maintainer') {
+      whereClause = 'WHERE user_id = ? OR assignee = ?';
+      params.push(userId, userId);
+    }
+
+    const stats: any = db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END) as assigned,
+        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
+      FROM work_orders
+      ${whereClause}
+    `).get(...params);
+
+    res.json({
+      success: true,
+      data: {
+        total: stats.total || 0,
+        pending: stats.pending || 0,
+        assigned: stats.assigned || 0,
+        processing: stats.processing || 0,
+        completed: stats.completed || 0,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: '获取工单统计失败' });
   }
 });
 
@@ -364,34 +404,34 @@ router.put('/:id/escalate', (req: AuthRequest, res: Response): void => {
       VALUES (?, ?, ?, ?)
     `).run(id, '升级工单', user.name, '用户手动升级工单');
 
-    const existing: any = db.prepare(`
-      SELECT COUNT(*) as count FROM notifications 
-      WHERE content LIKE ? AND type = 'workorder'
-    `).get(`%${order.id}%`);
+    const admins: any[] = db.prepare("SELECT * FROM users WHERE role = 'admin'").all();
+    for (const admin of admins) {
+      const existing: any = db.prepare(`
+        SELECT COUNT(*) as count FROM notifications 
+        WHERE user_id = ? AND content = ? AND type = 'escalation'
+      `).get(admin.id, `order:${order.id}`);
 
-    if (!existing || existing.count === 0) {
-      const admins: any[] = db.prepare("SELECT * FROM users WHERE role = 'admin'").all();
-      for (const admin of admins) {
-        const notificationId = generateId('notif');
-        db.prepare(`
-          INSERT INTO notifications (id, user_id, title, content, type)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(
-          notificationId,
-          admin.id,
-          '工单升级通知',
-          `工单【${order.title}】被${user.name}手动升级，请主管关注`,
-          'workorder'
-        );
+      if (existing && existing.count > 0) continue;
 
-        broadcastNotification(admin.id, {
-          id: notificationId,
-          title: '工单升级通知',
-          content: `工单【${order.title}】被${user.name}手动升级，请主管关注`,
-          type: 'workorder',
-          workOrderId: order.id,
-        });
-      }
+      const notificationId = generateId('notif');
+      db.prepare(`
+        INSERT INTO notifications (id, user_id, title, content, type)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(
+        notificationId,
+        admin.id,
+        '工单升级通知',
+        `order:${order.id}`,
+        'escalation'
+      );
+
+      broadcastNotification(admin.id, {
+        id: notificationId,
+        title: '工单升级通知',
+        content: `工单【${order.title}】被${user.name}手动升级，请主管关注`,
+        type: 'workorder',
+        workOrderId: order.id,
+      });
     }
 
     broadcastToRole('admin', {
@@ -405,48 +445,6 @@ router.put('/:id/escalate', (req: AuthRequest, res: Response): void => {
     res.json({ success: true, message: '工单已升级' });
   } catch (error) {
     res.status(500).json({ success: false, error: '升级工单失败' });
-  }
-});
-
-router.get('/stats/summary', (req: AuthRequest, res: Response): void => {
-  try {
-    const userId = req.user?.id;
-    const role = req.user?.role;
-
-    let whereClause = '';
-    const params: any[] = [];
-
-    if (role === 'user') {
-      whereClause = 'WHERE user_id = ?';
-      params.push(userId);
-    } else if (role === 'maintainer') {
-      whereClause = 'WHERE user_id = ? OR assignee = ?';
-      params.push(userId, userId);
-    }
-
-    const stats: any = db.prepare(`
-      SELECT
-        COUNT(*) as total,
-        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-        SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END) as assigned,
-        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
-        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
-      FROM work_orders
-      ${whereClause}
-    `).get(...params);
-
-    res.json({
-      success: true,
-      data: {
-        total: stats.total || 0,
-        pending: stats.pending || 0,
-        assigned: stats.assigned || 0,
-        processing: stats.processing || 0,
-        completed: stats.completed || 0,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: '获取工单统计失败' });
   }
 });
 

@@ -5,10 +5,10 @@ interface StatCardProps {
   value: string | number;
   unit?: string;
   icon: LucideIcon;
-  trend?: {
-    value: number;
-    isUp: boolean;
-  };
+  trend?:
+    | { value: number; isUp: boolean }
+    | string;
+  trendDirection?: 'up' | 'down' | 'neutral';
   color?: 'green' | 'blue' | 'yellow' | 'purple' | 'red';
   description?: string;
 }
@@ -21,23 +21,50 @@ const colorClasses = {
   red: 'from-red-500 to-red-600',
 };
 
-const bgColorClasses = {
-  green: 'bg-emerald-50 text-emerald-600',
-  blue: 'bg-blue-50 text-blue-600',
-  yellow: 'bg-amber-50 text-amber-600',
-  purple: 'bg-violet-50 text-violet-600',
-  red: 'bg-red-50 text-red-600',
-};
-
 export default function StatCard({
   title,
   value,
   unit,
   icon: Icon,
   trend,
+  trendDirection,
   color = 'green',
   description,
 }: StatCardProps) {
+  const renderTrend = () => {
+    if (!trend) return null;
+
+    if (typeof trend === 'string') {
+      const dirClass =
+        trendDirection === 'up'
+          ? 'text-emerald-600'
+          : trendDirection === 'down'
+          ? 'text-red-600'
+          : 'text-gray-500';
+      return (
+        <div className="flex items-center gap-1 mt-2">
+          <span className={`text-sm font-medium ${dirClass}`}>
+            {trendDirection === 'up' ? '↑' : trendDirection === 'down' ? '↓' : ''} {trend}
+          </span>
+        </div>
+      );
+    }
+
+    const numValue = typeof trend.value === 'number' && !isNaN(trend.value) ? Math.abs(trend.value) : 0;
+    return (
+      <div className="flex items-center gap-1 mt-2">
+        <span
+          className={`text-sm font-medium ${
+            trend.isUp ? 'text-emerald-600' : 'text-red-600'
+          }`}
+        >
+          {trend.isUp ? '↑' : '↓'} {numValue}%
+        </span>
+        <span className="text-xs text-gray-400">较昨日</span>
+      </div>
+    );
+  };
+
   return (
     <div className="card card-hover bg-white rounded-xl p-6 border border-gray-100 shadow-sm">
       <div className="flex items-start justify-between">
@@ -47,18 +74,7 @@ export default function StatCard({
             <span className="text-3xl font-bold text-gray-800">{value}</span>
             {unit && <span className="text-sm text-gray-500 ml-1">{unit}</span>}
           </div>
-          {trend && (
-            <div className="flex items-center gap-1 mt-2">
-              <span
-                className={`text-sm font-medium ${
-                  trend.isUp ? 'text-emerald-600' : 'text-red-600'
-                }`}
-              >
-                {trend.isUp ? '↑' : '↓'} {Math.abs(trend.value)}%
-              </span>
-              <span className="text-xs text-gray-400">较昨日</span>
-            </div>
-          )}
+          {renderTrend()}
           {description && (
             <p className="text-xs text-gray-400 mt-2">{description}</p>
           )}
